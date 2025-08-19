@@ -2,6 +2,7 @@
 """
 Binance 時間框架分析器
 支援所有現貨和永續合約交易對的分析
+專注於時間框架特性分析，不包含策略回測功能
 """
 
 import math
@@ -99,263 +100,140 @@ class BinanceTimeframeAnalyzer:
         }
         return df_1m.resample(rule, label='right', closed='right').agg(agg).dropna(subset=['open', 'high', 'low', 'close'])
     
-    def compute_atr(self, df: pd.DataFrame, period: int) -> pd.Series:
-        """計算 ATR"""
-        high = df['high']
-        low = df['low']
-        close = df['close']
-        prev_close = close.shift(1)
+    def compute_atr(self, ohlc: pd.DataFrame, period: int = 14) -> pd.Series:
+        """計算 ATR (Average True Range)"""
+        high = ohlc['high']
+        low = ohlc['low']
+        close = ohlc['close']
         
-        tr = pd.concat([
-            (high - low),
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1).max(axis=1)
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
         
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(period).mean()
+        
         return atr
     
-    def variance_ratio(self, returns: pd.Series, q: int) -> float:
-        """計算 Variance Ratio"""
-        r = returns.dropna()
-        if len(r) < q + 2:
+    def variance_ratio(self, log_returns: pd.Series, q: int) -> float:
+        """計算 Variance Ratio (Lo-MacKinlay)"""
+        if len(log_returns) < q * 2:
             return np.nan
-        var_1 = np.var(r, ddof=1)
-        r_q = r.rolling(q).sum()
-        var_q = np.var(r_q.dropna(), ddof=1)
+        
+        # 移除 NaN
+        log_returns = log_returns.dropna()
+        if len(log_returns) < q * 2:
+            return np.nan
+        
+        # 計算不同時間間隔的方差
+        var_1 = log_returns.var()
+        var_q = log_returns.rolling(q).sum().var()
+        
         if var_1 == 0:
             return np.nan
-        return float(var_q / (q * var_1))
+        
+        vr = var_q / (q * var_1)
+        return float(vr)
     
-    def estimate_half_life_by_autocorr(self, returns: pd.Series, max_lag: int) -> Optional[float]:
-        """估算訊號半衰期"""
-        r = returns.dropna()
-        if len(r) < max_lag + 5:
-            return None
+    def estimate_half_life_by_autocorr(self, log_returns: pd.Series, max_lag: int = 100) -> float:
+        """基於自相關估計半衰期"""
+        if len(log_returns) < max_lag * 2:
+            return np.nan
         
-        r = r - r.mean()
-        var = (r ** 2).sum()
-        if var == 0:
-            return None
+        log_returns = log_returns.dropna()
+        if len(log_returns) < max_lag * 2:
+            return np.nan
         
-        def autocorr(lag: int) -> float:
-            return float((r[lag:] * r.shift(lag)[lag:]).sum() / var)
+        # 計算自相關
+        autocorr = []
+        for lag in range(1, min(max_lag + 1, len(log_returns) // 2)):
+            corr = log_returns.autocorr(lag=lag)
+            if not pd.isna(corr):
+                autocorr.append((lag, corr))
         
-        rho1 = autocorr(1)
-        if np.isnan(rho1) or abs(rho1) < 1e-6:
-            return None
+        if len(autocorr) < 3:
+            return np.nan
         
-        target = 0.5 * abs(rho1)
-        for k in range(2, max_lag + 1):
-            rhok = autocorr(k)
-            if np.isnan(rhok):
-                continue
-            if abs(rhok) <= target:
-                return float(k)
-        return None
+        # 找到第一個負自相關
+        for lag, corr in autocorr:
+            if corr < 0:
+                return float(lag)
+        
+        # 如果沒有負自相關，返回最大延遲
+        return float(autocorr[-1][0]) if autocorr else np.nan
     
-    def bar_minutes(self, label: str) -> float:
-        """將時間框架標籤轉換為分鐘數"""
-        mapping = {
-            "1m": 1, "5m": 5, "15m": 15,
-            "1h": 60, "4h": 240,
-            "1d": 1440, "1w": 10080
-        }
-        return float(mapping.get(label, 1.0))
-    
-    def get_min_bars_for_timeframe(self, tf_label: str) -> int:
-        """根據時間框架動態計算最小資料量要求"""
+    def get_min_bars_for_timeframe(self, timeframe: str) -> int:
+        """獲取時間框架的最小 bar 數要求"""
         if not self.config.use_dynamic_min_bars:
             return self.config.n_min_bars_for_backtest
         
-        min_days = self.config.min_days_per_timeframe.get(tf_label, 365)
-        minutes_per_bar = self.bar_minutes(tf_label)
-        min_bars = int((min_days * 24 * 60) / minutes_per_bar)
-        min_bars = max(min_bars, 100)
+        # 動態計算最小 bar 數
+        min_days = self.config.min_days_per_timeframe.get(timeframe, 365)
         
-        return min_bars
-    
-    def annualization_factor(self, tf_label: str) -> float:
-        """計算年化倍數"""
-        bars_per_year = (365.0 * 24.0 * 60.0) / self.bar_minutes(tf_label)
-        return bars_per_year
-    
-    def apply_costs(self, returns: pd.Series, position: pd.Series, cost_one_way: float) -> pd.Series:
-        """根據部位變化計算交易成本"""
-        pos = position.fillna(0.0)
-        pos_prev = pos.shift(1).fillna(0.0)
-        turnover = (pos - pos_prev).abs()
-        
-        cost = turnover * cost_one_way
-        net_ret = pos_prev * returns - cost
-        return net_ret
-    
-    def sharpe_ratio(self, returns: pd.Series, ann_factor: float) -> float:
-        """計算夏普比率"""
-        r = returns.dropna()
-        if len(r) < 2:
-            return np.nan
-        mean = r.mean() * ann_factor
-        std = r.std(ddof=1) * math.sqrt(ann_factor)
-        return float(mean / std) if std > 0 else np.nan
-    
-    def max_drawdown(self, equity_curve: pd.Series) -> float:
-        """計算最大回撤"""
-        peak = equity_curve.cummax()
-        dd = equity_curve / peak - 1.0
-        return float(dd.min()) if len(dd) else np.nan
-    
-    def profit_factor(self, returns: pd.Series) -> float:
-        """計算獲利因子"""
-        gains = returns[returns > 0].sum()
-        losses = -returns[returns < 0].sum()
-        if losses == 0:
-            return np.inf if gains > 0 else np.nan
-        return float(gains / losses)
-    
-    def hit_rate(self, returns: pd.Series) -> float:
-        """計算勝率"""
-        r = returns.dropna()
-        if len(r) == 0:
-            return np.nan
-        return float((r > 0).mean())
-    
-    def ma_trend_positions(self, close: pd.Series, fast: int, slow: int) -> pd.Series:
-        """MA 趨勢策略"""
-        if slow <= fast:
-            return pd.Series(index=close.index, dtype=float)
-        f = close.rolling(fast).mean()
-        s = close.rolling(slow).mean()
-        pos = np.where(f > s, 1.0, np.where(f < s, -1.0, 0.0))
-        return pd.Series(pos, index=close.index, dtype=float)
-    
-    def rsi(self, series: pd.Series, window: int = 14) -> pd.Series:
-        """計算 RSI 指標"""
-        delta = series.diff()
-        up = delta.clip(lower=0.0)
-        down = -delta.clip(upper=0.0)
-        roll_up = up.rolling(window).mean()
-        roll_down = down.rolling(window).mean()
-        rs = roll_up / (roll_down + 1e-12)
-        return 100.0 - (100.0 / (1.0 + rs))
-    
-    def rsi_mr_positions(self, close: pd.Series, window: int, lower: int, upper: int) -> pd.Series:
-        """RSI 均值回歸策略"""
-        r = self.rsi(close, window)
-        pos = np.where(r < lower, 1.0, np.where(r > upper, -1.0, 0.0))
-        return pd.Series(pos, index=close.index, dtype=float)
-    
-    def backtest_positions(self, ohlc: pd.DataFrame, position: pd.Series, cost_one_way: float, ann_factor: float) -> Dict[str, float]:
-        """回測策略表現"""
-        px = ohlc['close']
-        ret = px.pct_change().fillna(0.0)
-        net = self.apply_costs(ret, position, cost_one_way)
-        eq = (1.0 + net).cumprod()
-        
-        metrics = {
-            "AnnRet": float((eq.iloc[-1] ** (ann_factor / max(len(eq), 1)) - 1.0)) if len(eq) > 0 else np.nan,
-            "Sharpe": self.sharpe_ratio(net, ann_factor),
-            "MDD": self.max_drawdown(eq),
-            "PF": self.profit_factor(net),
-            "HitRate": self.hit_rate(net),
-            "TradesPerYear": float((position.diff().abs().fillna(0.0).sum() / 2.0) * (ann_factor / max(len(position), 1))),
-            "AvgTurnover": float(position.diff().abs().fillna(0.0).mean())
-        }
-        return metrics
-    
-    def param_search_ma(self, ohlc: pd.DataFrame, cost_one_way: float, ann_factor: float) -> Tuple[Tuple[int, int], Dict[str, float]]:
-        """MA 策略參數搜尋"""
-        best_param = None
-        best_metric = -np.inf
-        best_stats = {}
-        close = ohlc['close']
-        
-        for f in self.config.ma_fast_grid:
-            for s in self.config.ma_slow_grid:
-                if s <= f:
-                    continue
-                pos = self.ma_trend_positions(close, f, s)
-                stats = self.backtest_positions(ohlc, pos, cost_one_way, ann_factor)
-                score = stats["Sharpe"]
-                if not np.isnan(score) and score > best_metric:
-                    best_metric = score
-                    best_param = (f, s)
-                    best_stats = stats
-        return best_param, best_stats
-    
-    def param_search_rsi(self, ohlc: pd.DataFrame, cost_one_way: float, ann_factor: float) -> Tuple[Tuple[int, int, int], Dict[str, float]]:
-        """RSI 策略參數搜尋"""
-        best_param = None
-        best_metric = -np.inf
-        best_stats = {}
-        close = ohlc['close']
-        
-        for w in self.config.rsi_window_grid:
-            for (lo, up) in self.config.rsi_band_grid:
-                pos = self.rsi_mr_positions(close, w, lo, up)
-                stats = self.backtest_positions(ohlc, pos, cost_one_way, ann_factor)
-                score = stats["Sharpe"]
-                if not np.isnan(score) and score > best_metric:
-                    best_metric = score
-                    best_param = (w, lo, up)
-                    best_stats = stats
-        return best_param, best_stats
-    
-    def walk_forward_oos(self, ohlc: pd.DataFrame, strategy: str, cost_one_way: float, ann_factor: float) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """Walk-forward 樣本外評估"""
-        n = len(ohlc)
-        train_len = int(n * self.config.wf_train_ratio)
-        test_len = int(n * self.config.wf_test_ratio)
-        if train_len < 200 or test_len < 100:
-            return {}, {}
-        
-        oos_metrics = []
-        chosen_params = []
-        
-        start = 0
-        while start + train_len + test_len <= n:
-            train = ohlc.iloc[start:start + train_len]
-            test = ohlc.iloc[start + train_len:start + train_len + test_len]
-            
-            if strategy == "MA":
-                param, _ = self.param_search_ma(train, cost_one_way, ann_factor)
-                if param is None:
-                    start += test_len
-                    continue
-                f, s = param
-                pos = self.ma_trend_positions(test['close'], f, s)
-            elif strategy == "RSI":
-                param, _ = self.param_search_rsi(train, cost_one_way, ann_factor)
-                if param is None:
-                    start += test_len
-                    continue
-                w, lo, up = param
-                pos = self.rsi_mr_positions(test['close'], w, lo, up)
-            else:
-                raise ValueError("未知策略")
-            
-            stats = self.backtest_positions(test, pos, cost_one_way, ann_factor)
-            oos_metrics.append(stats)
-            chosen_params.append(param)
-            start += test_len
-        
-        if not oos_metrics:
-            return {}, {}
-        
-        # 聚合 OOS 指標
-        oos_df = pd.DataFrame(oos_metrics)
-        oos_summary = {
-            "OOS_AnnRet": float(oos_df["AnnRet"].mean()),
-            "OOS_Sharpe": float(oos_df["Sharpe"].mean()),
-            "OOS_MDD": float(oos_df["MDD"].mean()),
-            "OOS_PF": float(oos_df["PF"].mean()),
-            "OOS_HitRate": float(oos_df["HitRate"].mean()),
-            "OOS_TradesPerYear": float(oos_df["TradesPerYear"].mean())
+        # 根據時間框架計算對應的 bar 數
+        timeframe_minutes = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440,
+            "1w": 10080
         }
         
-        last_param = chosen_params[-1] if chosen_params else None
-        chosen_param_dict = {"BestTrainParam_LastFold": str(last_param)}
-        return oos_summary, chosen_param_dict
+        minutes_per_bar = timeframe_minutes.get(timeframe, 1440)
+        min_bars = int(min_days * 24 * 60 / minutes_per_bar)
+        
+        return max(min_bars, 100)  # 至少需要 100 根 bar
+    
+    def annualization_factor(self, timeframe: str) -> float:
+        """計算年化因子"""
+        timeframe_minutes = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "1h": 60,
+            "4h": 240,
+            "1d": 1440,
+            "1w": 10080
+        }
+        
+        minutes_per_bar = timeframe_minutes.get(timeframe, 1440)
+        minutes_per_year = 365 * 24 * 60
+        
+        return minutes_per_year / minutes_per_bar
+    
+    def calculate_volatility(self, returns: pd.Series, ann_factor: float) -> float:
+        """計算年化波動率"""
+        if len(returns) < 2:
+            return np.nan
+        return float(returns.std() * np.sqrt(ann_factor))
+    
+    def calculate_skewness(self, returns: pd.Series) -> float:
+        """計算報酬偏度"""
+        if len(returns) < 3:
+            return np.nan
+        return float(returns.skew())
+    
+    def calculate_kurtosis(self, returns: pd.Series) -> float:
+        """計算報酬峰度"""
+        if len(returns) < 4:
+            return np.nan
+        return float(returns.kurtosis())
+    
+    def calculate_autocorrelation(self, returns: pd.Series, lag: int = 1) -> float:
+        """計算報酬自相關"""
+        if len(returns) < lag + 1:
+            return np.nan
+        return float(returns.autocorr(lag=lag))
+    
+    def calculate_market_efficiency_ratio(self, log_returns: pd.Series, q: int = 4) -> float:
+        """計算市場效率比率（基於方差比）"""
+        vr = self.variance_ratio(log_returns, q)
+        if pd.isna(vr):
+            return np.nan
+        # 市場效率比率 = 1 / VR，越接近1表示越有效率
+        return float(1.0 / vr) if vr > 0 else np.nan
     
     def analyze_timeframes(self) -> pd.DataFrame:
         """分析所有時間框架"""
@@ -399,9 +277,13 @@ class BinanceTimeframeAnalyzer:
             # 半衰期
             hl = self.estimate_half_life_by_autocorr(np.log1p(ret), self.config.half_life_max_lag)
             
-            # Walk-forward
-            ma_oos, ma_param = self.walk_forward_oos(ohlc, "MA", cost_one_way, ann_factor)
-            rsi_oos, rsi_param = self.walk_forward_oos(ohlc, "RSI", cost_one_way, ann_factor)
+            # 新增技術指標
+            log_returns = np.log1p(ret).dropna()
+            volatility_ann = self.calculate_volatility(ret.dropna(), ann_factor)
+            skewness = self.calculate_skewness(ret.dropna())
+            kurtosis = self.calculate_kurtosis(ret.dropna())
+            autocorr_lag1 = self.calculate_autocorrelation(ret.dropna(), 1)
+            market_efficiency = self.calculate_market_efficiency_ratio(log_returns, self.config.vr_q)
             
             row = {
                 "Timeframe": tf_label,
@@ -412,15 +294,12 @@ class BinanceTimeframeAnalyzer:
                 "VR_q": self.config.vr_q,
                 "VarianceRatio": vr,
                 "HalfLife_bars": hl,
+                "Volatility_Ann": volatility_ann,
+                "Skewness": skewness,
+                "Kurtosis": kurtosis,
+                "Autocorr_Lag1": autocorr_lag1,
+                "Market_Efficiency": market_efficiency
             }
-            
-            if ma_oos:
-                row.update({f"MA_{k}": v for k, v in ma_oos.items()})
-            if rsi_oos:
-                row.update({f"RSI_{k}": v for k, v in rsi_oos.items()})
-            
-            row.update({f"MA_{k}": v for k, v in ma_param.items()} if ma_param else {})
-            row.update({f"RSI_{k}": v for k, v in rsi_param.items()} if rsi_param else {})
             
             row["Pass_CA_0.25"] = (c_over_a < 0.25) if not (pd.isna(c_over_a)) else False
             
@@ -431,8 +310,8 @@ class BinanceTimeframeAnalyzer:
             return pd.DataFrame()
         
         report = pd.DataFrame(report_rows).sort_values(
-            by=["Pass_CA_0.25", "MA_OOS_Sharpe", "RSI_OOS_Sharpe"],
-            ascending=[False, False, False]
+            by=["Pass_CA_0.25", "C_over_A"],
+            ascending=[False, True]
         )
         
         return report
@@ -466,11 +345,19 @@ class BinanceTimeframeAnalyzer:
                 f.write(txt_report)
             print(f"✅ 已輸出TXT報表：{out_txt}")
         
+        # 生成MD報告
+        if self.config.generate_md_report:
+            md_report = self.generate_md_report(report_df)
+            out_md = f"./data/{filename_prefix}.md"
+            with open(out_md, 'w', encoding='utf-8') as f:
+                f.write(md_report)
+            print(f"✅ 已輸出MD報表：{out_md}")
+        
         print("\n📋 報告解讀指南：")
         print("1) 先看 C_over_A 是否 < 0.25（越低越好）。")
-        print("2) 再看策略 OOS_Sharpe（跨折平均）與 OOS_MDD。")
-        print("3) VR>1 偏趨勢；VR<1 偏均值回歸；HalfLife 提示 bar 粗細。")
-        print("4) 詳細報告包含測試日期範圍、成本設定、策略參數等完整資訊。")
+        print("2) 再看 VarianceRatio 判斷市場特性（>1偏趨勢，<1偏均值回歸）。")
+        print("3) 半衰期提示 bar 粗細，建議bar週期約為0.5~1倍半衰期。")
+        print("4) 技術指標幫助了解市場統計特性。")
     
     def generate_txt_report(self, report_df: pd.DataFrame) -> str:
         """生成TXT格式的詳細報告"""
@@ -499,6 +386,15 @@ class BinanceTimeframeAnalyzer:
         report.append(f"費率類型: {'吃單費率' if self.config.use_taker else '掛單費率'}")
         report.append(f"單邊成本: {cost_one_way:.6f} ({cost_one_way*100:.4f}%)")
         report.append(f"來回成本: {cost_one_way*2:.6f} ({cost_one_way*2*100:.4f}%)")
+        report.append("")
+        
+        # 分析設定
+        report.append("⚙️ 分析設定")
+        report.append("-" * 40)
+        report.append(f"ATR計算週期: {self.config.atr_period}")
+        report.append(f"Variance Ratio聚合尺度: {self.config.vr_q}")
+        report.append(f"半衰期計算最大延遲: {self.config.half_life_max_lag}")
+        report.append(f"動態最小資料量: {'啟用' if self.config.use_dynamic_min_bars else '停用'}")
         report.append("")
         
         # 時間框架分析結果
@@ -568,9 +464,148 @@ class BinanceTimeframeAnalyzer:
         report.append("• 偏度: 正偏度表示右尾較長，負偏度表示左尾較長")
         report.append("• 峰度: 高峰度表示極端值較多")
         report.append("• 自相關: 正值表示趨勢性，負值表示均值回歸")
+        report.append("• 市場效率比率: 越接近1表示市場越有效率")
         
         report.append("")
         report.append("=" * 80)
+        
+        return "\n".join(report)
+    
+    def generate_md_report(self, report_df: pd.DataFrame) -> str:
+        """生成Markdown格式的詳細報告"""
+        report = []
+        report.append(f"# {self.config.symbol} 時間框架選擇分析報告")
+        report.append("")
+        report.append(f"**生成時間**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report.append("")
+        
+        # 基本資訊
+        report.append("## 📊 基本資訊")
+        report.append("")
+        report.append("| 項目 | 數值 |")
+        report.append("|------|------|")
+        report.append(f"| 交易對 | {self.config.symbol} |")
+        report.append(f"| 市場類型 | {self.config.market_type.upper()} |")
+        report.append(f"| 交易所 | {self.config.exchange.upper()} |")
+        report.append(f"| 測試開始時間 | {self.df_1m.index.min().strftime('%Y-%m-%d %H:%M:%S')} |")
+        report.append(f"| 測試結束時間 | {self.df_1m.index.max().strftime('%Y-%m-%d %H:%M:%S')} |")
+        report.append(f"| 總測試天數 | {(self.df_1m.index.max() - self.df_1m.index.min()).days} 天 |")
+        report.append(f"| 原始資料K線數 | {len(self.df_1m):,} |")
+        report.append("")
+        
+        # 成本設定
+        cost_one_way = (self.config.taker_fee if self.config.use_taker else self.config.maker_fee) + self.config.slippage_bps / 10000.0
+        report.append("## 💰 成本設定")
+        report.append("")
+        report.append("| 項目 | 數值 |")
+        report.append("|------|------|")
+        report.append(f"| 費率類型 | {'吃單費率' if self.config.use_taker else '掛單費率'} |")
+        report.append(f"| 單邊成本 | {cost_one_way:.6f} ({cost_one_way*100:.4f}%) |")
+        report.append(f"| 來回成本 | {cost_one_way*2:.6f} ({cost_one_way*2*100:.4f}%) |")
+        report.append("")
+        
+        # 分析設定
+        report.append("## ⚙️ 分析設定")
+        report.append("")
+        report.append("| 項目 | 數值 |")
+        report.append("|------|------|")
+        report.append(f"| ATR計算週期 | {self.config.atr_period} |")
+        report.append(f"| Variance Ratio聚合尺度 | {self.config.vr_q} |")
+        report.append(f"| 半衰期計算最大延遲 | {self.config.half_life_max_lag} |")
+        report.append(f"| 動態最小資料量 | {'啟用' if self.config.use_dynamic_min_bars else '停用'} |")
+        report.append("")
+        
+        # 時間框架分析結果
+        report.append("## 📈 時間框架分析結果")
+        report.append("")
+        
+        # 創建表格標題
+        table_headers = ["時間框架", "K線數", "C/A", "VR", "半衰期", "波動率", "偏度", "峰度", "自相關", "市場效率", "通過C/A測試", "狀態"]
+        report.append("| " + " | ".join(table_headers) + " |")
+        report.append("|" + "|".join(["---"] * len(table_headers)) + "|")
+        
+        tested_timeframes = set(report_df['Timeframe'].tolist())
+        
+        for tf_label, rule in self.config.timeframes.items():
+            if tf_label in tested_timeframes:
+                row = report_df[report_df['Timeframe'] == tf_label].iloc[0]
+                
+                # 格式化數值
+                bars = f"{row['Bars']:,}"
+                ca = f"{row['C_over_A']:.4f}" if not pd.isna(row['C_over_A']) else "N/A"
+                vr = f"{row['VarianceRatio']:.4f}" if not pd.isna(row['VarianceRatio']) else "N/A"
+                hl = f"{row['HalfLife_bars']:.1f}" if not pd.isna(row['HalfLife_bars']) else "N/A"
+                vol = f"{row['Volatility_Ann']:.4f}" if not pd.isna(row['Volatility_Ann']) else "N/A"
+                skew = f"{row['Skewness']:.4f}" if not pd.isna(row['Skewness']) else "N/A"
+                kurt = f"{row['Kurtosis']:.4f}" if not pd.isna(row['Kurtosis']) else "N/A"
+                autocorr = f"{row['Autocorr_Lag1']:.4f}" if not pd.isna(row['Autocorr_Lag1']) else "N/A"
+                me = f"{row['Market_Efficiency']:.4f}" if not pd.isna(row['Market_Efficiency']) else "N/A"
+                pass_ca = "✅" if row['Pass_CA_0.25'] else "❌"
+                status = "✅ 已測試"
+                
+                report.append(f"| {tf_label} | {bars} | {ca} | {vr} | {hl} | {vol} | {skew} | {kurt} | {autocorr} | {me} | {pass_ca} | {status} |")
+            else:
+                report.append(f"| {tf_label} | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | ❌ 未測試 |")
+        
+        report.append("")
+        
+        # 詳細分析
+        report.append("### 🔍 詳細分析")
+        report.append("")
+        
+        for tf_label, rule in self.config.timeframes.items():
+            if tf_label in tested_timeframes:
+                row = report_df[report_df['Timeframe'] == tf_label].iloc[0]
+                report.append(f"#### 🕐 {row['Timeframe']} 時間框架")
+                report.append("")
+                report.append("**基本統計:**")
+                report.append(f"- K線數量: {row['Bars']:,}")
+                report.append(f"- 平均ATR: {row['Avg_ATR_pct']:.4f} ({row['Avg_ATR_pct']*100:.2f}%)")
+                report.append(f"- 成本/波動比 (C/A): {row['C_over_A']:.4f}")
+                report.append(f"- 走勢一致性 (VR): {row['VarianceRatio']:.4f}")
+                report.append(f"- 訊號半衰期: {row['HalfLife_bars']:.1f} bars")
+                report.append("")
+                
+                if not pd.isna(row['Volatility_Ann']):
+                    report.append("**技術指標:**")
+                    report.append(f"- 年化波動率: {row['Volatility_Ann']:.4f}")
+                    report.append(f"- 報酬偏度: {row['Skewness']:.4f}")
+                    report.append(f"- 報酬峰度: {row['Kurtosis']:.4f}")
+                    report.append(f"- 自相關(Lag1): {row['Autocorr_Lag1']:.4f}")
+                    report.append(f"- 市場效率比率: {row['Market_Efficiency']:.4f}")
+                    report.append("")
+                
+                if row['Pass_CA_0.25']:
+                    report.append("✅ **通過C/A < 0.25測試**")
+                else:
+                    report.append("❌ **未通過C/A < 0.25測試**")
+                report.append("")
+        
+        # 綜合建議
+        report.append("## 💡 綜合建議")
+        report.append("")
+        
+        best_ca = report_df.loc[report_df['C_over_A'].idxmin()] if 'C_over_A' in report_df.columns else None
+        best_vr = report_df.loc[report_df['VarianceRatio'].idxmax()] if 'VarianceRatio' in report_df.columns else None
+        
+        if best_ca is not None and not pd.isna(best_ca['C_over_A']):
+            report.append(f"**最佳成本效率時間框架**: {best_ca['Timeframe']} (C/A: {best_ca['C_over_A']:.4f})")
+        
+        if best_vr is not None and not pd.isna(best_vr['VarianceRatio']):
+            report.append(f"**最高趨勢性時間框架**: {best_vr['Timeframe']} (VR: {best_vr['VarianceRatio']:.4f})")
+        
+        report.append("")
+        report.append("### 📋 指標解讀指南")
+        report.append("")
+        report.append("- **C/A < 0.25**: 成本相對於波動率較低，適合交易")
+        report.append("- **VR > 1**: 偏趨勢市場，適合趨勢策略")
+        report.append("- **VR < 1**: 偏均值回歸市場，適合均值回歸策略")
+        report.append("- **半衰期**: 建議bar週期約為0.5~1倍半衰期")
+        report.append("- **波動率**: 反映市場波動程度")
+        report.append("- **偏度**: 正偏度表示右尾較長，負偏度表示左尾較長")
+        report.append("- **峰度**: 高峰度表示極端值較多")
+        report.append("- **自相關**: 正值表示趨勢性，負值表示均值回歸")
+        report.append("- **市場效率比率**: 越接近1表示市場越有效率")
         
         return "\n".join(report)
     
