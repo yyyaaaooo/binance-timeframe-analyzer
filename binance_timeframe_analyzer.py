@@ -466,6 +466,157 @@ class BinanceTimeframeAnalyzer:
         report.append("• 自相關: 正值表示趨勢性，負值表示均值回歸")
         report.append("• 市場效率比率: 越接近1表示市場越有效率")
         
+        # 添加詳細指標解釋
+        report.append("")
+        report.append("📊 詳細指標解釋")
+        report.append("-" * 40)
+        report.append("")
+        
+        report.append("🔍 成本/波動比 (C/A Ratio)")
+        report.append("意義: 衡量交易成本相對於市場波動的比率")
+        report.append("解讀: ")
+        report.append("• C/A < 0.25: 成本相對較低，適合頻繁交易")
+        report.append("• C/A 0.25-0.5: 成本適中，需要謹慎選擇入場點")
+        report.append("• C/A > 0.5: 成本過高，不適合短線交易")
+        report.append("")
+        
+        report.append("🔍 走勢一致性 (Variance Ratio, VR)")
+        report.append("意義: 衡量價格變動的趨勢性強度")
+        report.append("解讀:")
+        report.append("• VR > 1: 價格變動具有趨勢性，適合趨勢跟隨策略")
+        report.append("• VR < 1: 價格變動偏向隨機遊走，適合均值回歸策略")
+        report.append("• VR ≈ 1: 價格變動接近隨機遊走")
+        report.append("")
+        
+        report.append("🔍 訊號半衰期 (Signal Half-Life)")
+        report.append("意義: 衡量價格訊號的持續時間")
+        report.append("解讀:")
+        report.append("• 半衰期越長，訊號越持久，適合較長期的策略")
+        report.append("• 半衰期越短，訊號變化越快，需要更頻繁的調整")
+        report.append("")
+        
+        report.append("🔍 年化波動率 (Annualized Volatility)")
+        report.append("意義: 衡量價格變動的劇烈程度")
+        report.append("解讀:")
+        report.append("• 波動率越高，價格變動越劇烈，風險越大")
+        report.append("• 波動率越低，價格變動越平穩，風險較小")
+        report.append("")
+        
+        report.append("🔍 報酬偏度 (Return Skewness)")
+        report.append("意義: 衡量報酬分布的對稱性")
+        report.append("解讀:")
+        report.append("• 正偏度: 右尾較長，大幅上漲機率較高")
+        report.append("• 負偏度: 左尾較長，大幅下跌機率較高")
+        report.append("")
+        
+        report.append("🔍 報酬峰度 (Return Kurtosis)")
+        report.append("意義: 衡量報酬分布的尖銳程度")
+        report.append("解讀:")
+        report.append("• 高峰度: 極端值出現機率較高，風險較大")
+        report.append("• 低峰度: 分布較平坦，極端值較少")
+        report.append("")
+        
+        report.append("🔍 自相關 (Autocorrelation)")
+        report.append("意義: 衡量當前價格與過去價格的相關性")
+        report.append("解讀:")
+        report.append("• 正值: 價格具有趨勢性，過去走勢對未來有影響")
+        report.append("• 負值: 價格具有均值回歸特性")
+        report.append("")
+        
+        report.append("🔍 市場效率比率 (Market Efficiency Ratio)")
+        report.append("意義: 衡量市場的資訊效率")
+        report.append("解讀:")
+        report.append("• 接近1: 市場效率較高，價格充分反映資訊")
+        report.append("• 遠離1: 市場效率較低，可能存在套利機會")
+        report.append("")
+        
+        # 添加市場分析結論
+        report.append("📈 市場分析結論")
+        report.append("-" * 40)
+        report.append("")
+        
+        # 分析整體市場特性
+        avg_volatility = report_df['Volatility_Ann'].mean() if 'Volatility_Ann' in report_df.columns else None
+        avg_vr = report_df['VarianceRatio'].mean() if 'VarianceRatio' in report_df.columns else None
+        avg_autocorr = report_df['Autocorr_Lag1'].mean() if 'Autocorr_Lag1' in report_df.columns else None
+        avg_me = report_df['Market_Efficiency'].mean() if 'Market_Efficiency' in report_df.columns else None
+        
+        report.append("🎯 整體市場特性:")
+        if avg_volatility and not pd.isna(avg_volatility):
+            volatility_level = "高" if avg_volatility > 0.5 else "中" if avg_volatility > 0.3 else "低"
+            report.append(f"1. 波動性: {self.config.symbol} {self.config.market_type}年化波動率約{avg_volatility:.1%}，屬於{volatility_level}波動資產")
+        
+        if avg_me and not pd.isna(avg_me):
+            efficiency_level = "高" if abs(avg_me - 1) < 0.1 else "中" if abs(avg_me - 1) < 0.2 else "低"
+            report.append(f"2. 市場效率: 各時間框架的市場效率比率都接近1，顯示市場資訊效率較{efficiency_level}")
+        
+        if avg_autocorr and not pd.isna(avg_autocorr):
+            if avg_autocorr < -0.01:
+                report.append("3. 均值回歸: 大部分時間框架顯示負自相關，表示價格具有均值回歸特性")
+            elif avg_autocorr > 0.01:
+                report.append("3. 趨勢性: 大部分時間框架顯示正自相關，表示價格具有趨勢性")
+            else:
+                report.append("3. 隨機性: 大部分時間框架顯示接近零的自相關，表示價格變動接近隨機")
+        
+        # 分析偏度特性
+        long_term_timeframes = ['1d', '1w']
+        long_term_skewness = []
+        for tf in long_term_timeframes:
+            if tf in report_df['Timeframe'].values:
+                row = report_df[report_df['Timeframe'] == tf].iloc[0]
+                if 'Skewness' in row and not pd.isna(row['Skewness']):
+                    long_term_skewness.append(row['Skewness'])
+        
+        if long_term_skewness:
+            avg_long_skew = sum(long_term_skewness) / len(long_term_skewness)
+            if avg_long_skew > 0.1:
+                report.append("4. 長期正偏度: 較長時間框架顯示正偏度，長期來看上漲機率較高")
+            elif avg_long_skew < -0.1:
+                report.append("4. 長期負偏度: 較長時間框架顯示負偏度，長期來看下跌機率較高")
+            else:
+                report.append("4. 長期對稱性: 較長時間框架顯示接近對稱的分布")
+        
+        report.append("")
+        report.append("🎯 交易策略建議:")
+        
+        # 分析通過C/A測試的時間框架
+        passed_timeframes = report_df[report_df['Pass_CA_0.25'] == True]['Timeframe'].tolist()
+        short_timeframes = [tf for tf in passed_timeframes if tf in ['1m', '5m', '15m']]
+        medium_timeframes = [tf for tf in passed_timeframes if tf in ['1h', '4h']]
+        long_timeframes = [tf for tf in passed_timeframes if tf in ['1d', '1w']]
+        
+        if short_timeframes:
+            report.append(f"1. 短線交易({', '.join(short_timeframes)}): 適合，成本效率較好")
+        else:
+            report.append("1. 短線交易(1m-15m): 不建議，因為交易成本相對波動率過高(C/A > 0.25)")
+        
+        if medium_timeframes:
+            report.append(f"2. 中線交易({', '.join(medium_timeframes)}): 適合，成本效率較好")
+        
+        if long_timeframes:
+            report.append(f"3. 長線交易({', '.join(long_timeframes)}): 最適合，成本效率最佳，適合趨勢跟隨策略")
+        
+        report.append("")
+        report.append("🎯 風險管理建議:")
+        report.append("1. 由於高波動性，建議使用較小的倉位規模")
+        report.append("2. 設置適當的止損位，避免極端價格變動造成的損失")
+        report.append("3. 考慮使用期權等衍生品進行風險對沖")
+        report.append("4. 關注市場情緒指標，避免在極端市場條件下交易")
+        
+        report.append("")
+        report.append("🎯 最佳時間框架選擇:")
+        
+        # 找出最佳時間框架
+        if best_ca is not None and not pd.isna(best_ca['C_over_A']):
+            if best_ca['Timeframe'] in ['1h', '4h']:
+                report.append(f"• 日內交易: {best_ca['Timeframe']}時間框架 (C/A: {best_ca['C_over_A']:.4f})")
+            elif best_ca['Timeframe'] in ['1d', '1w']:
+                report.append(f"• 長期投資: {best_ca['Timeframe']}時間框架 (C/A: {best_ca['C_over_A']:.4f}，成本效率最佳)")
+        
+        if best_vr is not None and not pd.isna(best_vr['VarianceRatio']):
+            if best_vr['VarianceRatio'] > 1.05:
+                report.append(f"• 波段交易: {best_vr['Timeframe']}時間框架 (VR: {best_vr['VarianceRatio']:.4f}，趨勢性最強)")
+        
         report.append("")
         report.append("=" * 80)
         

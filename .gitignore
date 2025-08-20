@@ -134,8 +134,22 @@ dmypy.json
 config.ini
 secrets.json
 
-# Data files (large CSV files)
-data/*.csv
+# Data files - exclude large raw data files but allow analysis reports
+# Large raw data files (exclude from version control)
+data/*_1m.csv
+data/*_5m.csv
+data/*_15m.csv
+data/*_1h.csv
+data/*_4h.csv
+data/*_1d.csv
+data/*_1w.csv
+
+# Allow analysis reports (include in version control)
+!data/*_timeframe_report_*.csv
+!data/*_timeframe_report_*.md
+!data/*_timeframe_report_*.txt
+
+# Other data files (exclude)
 data/*.json
 
 # IDE files

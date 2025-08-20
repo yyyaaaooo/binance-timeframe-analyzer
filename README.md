@@ -183,6 +183,38 @@ config = BinanceConfig(
 4. **記憶體使用**: 長時間資料分析可能消耗較多記憶體
 5. **交易成本**: 不同市場類型的費率結構不同，請根據實際情況調整
 
+## 📁 資料管理
+
+### 版本控制策略
+- **✅ 納入版本控制**: 分析報告檔案 (小檔案，有價值)
+  - `*_timeframe_report_*.md` - Markdown 報告
+  - `*_timeframe_report_*.txt` - 文字報告
+  - `*_timeframe_report_*.csv` - CSV 報告
+- **❌ 不納入版本控制**: 大型原始資料檔案
+  - `*_1m.csv` (每個檔案約180-200MB)
+  - 動態生成的資料，可以重新下載
+
+### 資料管理工具
+```bash
+# 檢查資料完整性
+python scripts/data_management.py
+
+# 功能包括：
+# 1. 檢查資料完整性
+# 2. 查看檔案詳細資訊  
+# 3. 清理舊資料
+# 4. 備份分析報告
+# 5. 恢復所有資料
+# 6. 創建資料樣本
+```
+
+### 資料恢復
+如果原始資料遺失，可以重新下載：
+```python
+from binance_timeframe_analyzer import analyze_symbol
+analyze_symbol("ETHUSDT", "spot", 1095)  # 重新下載3年資料
+```
+
 ## 📚 詳細文檔
 
 - [詳細使用說明](README_binance_analyzer.md)

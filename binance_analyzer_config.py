@@ -25,9 +25,9 @@ class BinanceAnalyzerConfig:
     min_data_quality_score: float = 0.8        # 最低資料品質分數（0-1）
     
     # 報告格式設定
-    generate_csv_report: bool = True           # 生成CSV報告
+    generate_csv_report: bool = False          # 生成CSV報告
     generate_txt_report: bool = True           # 生成TXT報告
-    generate_md_report: bool = True            # 生成MD報告
+    generate_md_report: bool = False           # 生成MD報告
     
     # 費率設定（現貨 vs 永續合約）
     spot_taker_fee: float = 0.001              # 現貨吃單費率 0.1%
